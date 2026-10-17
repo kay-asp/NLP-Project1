@@ -32,7 +32,8 @@ from data import (make_embeddings, split_classes, build_sampler, next_batch,
 @dataclass
 class Config:
     # data
-    feature_dim: int = 64
+    data_file: str = 'omniglot_resnet18_randomized_order_s0.h5'
+    feature_dim: int = 512        # ResNet-18 feature dim of the Omniglot file
     n_train_classes: int = 50
     n_val_classes: int = 20
     n_test_classes: int = 30
@@ -75,7 +76,9 @@ class Config:
 
 def build_model(cfg, key):
     """Base InductionTransformer."""
-    ...
+    return InductionTransformer(cfg.feature_dim, cfg.n_labels, d_model=cfg.d_model,
+                                depth=cfg.depth, num_heads=cfg.num_heads,
+                                mlp_ratio=cfg.mlp_ratio, use_rope=cfg.use_rope, key=key)
 
 
 class ExtendedSequenceClassifier(eqx.Module):
@@ -98,9 +101,17 @@ def build_extended_model(cfg, key):
 # Losses and steps
 # --------------------------------------------------------------------------- #
 
+def _query_logits(model, batch):
+    # logits at every exemplar position; the query is the last one.
+    logits = jax.vmap(lambda e, l: model(e, l))(batch['examples'], batch['labels'])
+    return logits[:, -1, :]
+
+
 def base_loss(model, batch):
     """Cross-entropy on the query-position label."""
-    ...
+    logits = _query_logits(model, batch)
+    targets = batch['labels'][:, -1]
+    return optax.softmax_cross_entropy_with_integer_labels(logits, targets).mean()
 
 
 def extended_loss(model, batch):
@@ -110,19 +121,25 @@ def extended_loss(model, batch):
 
 def loss_fn(cfg):
     """Return the loss function for the configured mode."""
-    ...
+    return base_loss if cfg.mode == 'base' else extended_loss
 
 
 @eqx.filter_jit
 def train_step(model, opt_state, batch, optimizer, loss):
     """One optimiser update; return (model, opt_state, loss_value)."""
-    ...
+    loss_value, grads = eqx.filter_value_and_grad(loss)(model, batch)
+    params = eqx.filter(model, eqx.is_inexact_array)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    model = eqx.apply_updates(model, updates)
+    return model, opt_state, loss_value
 
 
 @eqx.filter_jit
 def eval_step(model, batch, loss):
-    """Return (loss_value, predictions) without updating."""
-    ...
+    """Return (loss_value, query-label predictions) without updating."""
+    loss_value = loss(model, batch)
+    preds = jnp.argmax(_query_logits(model, batch), axis=-1)
+    return loss_value, preds
 
 
 # --------------------------------------------------------------------------- #
@@ -131,7 +148,13 @@ def eval_step(model, batch, loss):
 
 def accuracy(model, sampler, key, n_batches):
     """Query-label accuracy averaged over n_batches drawn from sampler."""
-    ...
+    correct = total = 0
+    for i in range(n_batches):
+        batch = next_batch(sampler, jrandom.fold_in(key, i))
+        preds = jnp.argmax(_query_logits(model, batch), axis=-1)
+        correct += int(jnp.sum(preds == batch['labels'][:, -1]))
+        total += int(preds.shape[0])
+    return correct / total
 
 
 def perplexity(mean_loss):
@@ -143,8 +166,28 @@ def perplexity(mean_loss):
 # --------------------------------------------------------------------------- #
 
 def train_generation(cfg, model, train_sampler, val_sampler, key):
-    """Train one model; return (model, history) where history logs loss/accuracy."""
-    ...
+    """Train one model; return (model, history) logging loss/accuracy at eval points."""
+    optimizer = optax.adam(cfg.lr)
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
+    loss = loss_fn(cfg)
+    n_eval = max(1, cfg.eval_iters // cfg.batch_size)
+    history = {'step': [], 'train_loss': [], 'val_loss': [], 'val_acc': []}
+
+    for step in range(1, cfg.train_iters + 1):
+        batch = next_batch(train_sampler, jrandom.fold_in(key, step))
+        model, opt_state, train_loss = train_step(model, opt_state, batch, optimizer, loss)
+        if step == 1 or step % cfg.eval_every == 0:
+            vbatch = next_batch(val_sampler, jrandom.fold_in(key, 10_000_000 + step))
+            val_loss = loss(model, vbatch)
+            val_acc = accuracy(model, val_sampler,
+                               jrandom.fold_in(key, 20_000_000 + step), n_eval)
+            history['step'].append(step)
+            history['train_loss'].append(float(train_loss))
+            history['val_loss'].append(float(val_loss))
+            history['val_acc'].append(float(val_acc))
+            print(f'step {step:>6}/{cfg.train_iters}  train_loss {float(train_loss):.4f}  '
+                  f'val_loss {float(val_loss):.4f}  val_acc {val_acc:.3f}', flush=True)
+    return model, history
 
 
 # --------------------------------------------------------------------------- #
@@ -169,7 +212,7 @@ def collapse_pipeline(cfg):
     {ckpt_dir}/{run_name}/gen{g}/. Returns (models, histories)."""
     key = jrandom.PRNGKey(cfg.init_seed)
     n_classes = cfg.n_train_classes + cfg.n_val_classes + cfg.n_test_classes
-    embeddings = make_embeddings(key, n_classes, cfg.n_exemplars, cfg.feature_dim)
+    embeddings = make_embeddings(cfg.data_file, n_classes, cfg.n_exemplars)
     train_cls, val_cls, test_cls = split_classes(cfg)
     val_sampler = build_sampler(cfg, embeddings, val_cls)
     build = build_extended_model if cfg.mode == 'extended' else build_model

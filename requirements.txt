@@ -8,4 +8,4 @@ optax>=0.2.0
 numpy>=1.26
 matplotlib>=3.7
 scikit-learn>=1.3     # PCA / t-SNE of symbol embeddings
-# h5py>=3.9            # uncomment only if loading the Omniglot .h5 from the paper repo
+h5py>=3.9              # Omniglot ResNet-18 features (.h5)

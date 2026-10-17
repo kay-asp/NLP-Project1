@@ -59,21 +59,31 @@ def make_sampler(embeddings, class_pool, batch_size, context_len, n_labels, burs
 # Dataset construction and split wiring (cfg is duck-typed; no Config import)
 # --------------------------------------------------------------------------- #
 
-def make_embeddings(key, n_classes, n_exemplars, feature_dim):
-    """Return a [n_classes, n_exemplars, feature_dim] array of fixed symbol vectors."""
-    ...
+def make_embeddings(data_file, n_classes, n_exemplars):
+    """Load Omniglot ResNet-18 features from `data_file` (shape
+    [classes, exemplars, feature_dim]) and return the first n_classes/n_exemplars."""
+    import h5py
+    with h5py.File(data_file, 'r') as f:
+        arr = f['resnet18/224/feat'][:]   # other key is 'class_order' (1-D permutation)
+    assert arr.ndim == 3, f'expected [classes, exemplars, dim], got {arr.shape}'
+    assert arr.shape[0] >= n_classes and arr.shape[1] >= n_exemplars, 'file too small'
+    return jnp.asarray(arr[:n_classes, :n_exemplars])
 
 
 def split_classes(cfg):
-    """Return (train_idxs, val_idxs, test_idxs) arrays into the class axis."""
-    ...
+    """Partition the first (train+val+test) classes into contiguous index arrays.
+    The Omniglot file is pre-shuffled, so a contiguous split is already random."""
+    n_tr, n_va, n_te = cfg.n_train_classes, cfg.n_val_classes, cfg.n_test_classes
+    idx = jnp.arange(n_tr + n_va + n_te)
+    return idx[:n_tr], idx[n_tr:n_tr + n_va], idx[n_tr + n_va:]
 
 
 def build_sampler(cfg, embeddings, class_pool):
     """Return sample(key) -> batch, via make_sampler over this split's classes."""
-    ...
+    return make_sampler(embeddings, class_pool, cfg.batch_size, cfg.context_len,
+                        cfg.n_labels, cfg.burstiness)
 
 
 def next_batch(sampler, key):
     """Draw one {'examples', 'labels', 'class_ids'} batch."""
-    ...
+    return sampler(key)

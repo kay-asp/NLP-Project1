@@ -23,8 +23,17 @@ Python 3.10+.
 pip install -r requirements.txt
 ```
 
-Default config uses randomly generated symbol embeddings, so no dataset download
-is required. For a GPU, install the CUDA build of JAX first (see `requirements.txt`).
+The task uses pre-extracted Omniglot ResNet-18 features; download the data file
+before running (see [Data](#data) below). For a GPU, install the CUDA build of
+JAX first (see `requirements.txt`).
+
+## Data
+
+The task uses the pre-extracted Omniglot ResNet-18 features from the paper repo:
+`omniglot_resnet18_randomized_order_s0.h5` (shape `[classes, exemplars, 512]`).
+Download it from https://github.com/aadityasingh/icl-dynamics and place it in the
+project root (it is gitignored, so it is not committed). Point `cfg.data_file` at
+it if you store it elsewhere.
 
 ## Running
 
